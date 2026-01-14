@@ -13,7 +13,7 @@ import {
 
 const baseContext: string = 'functional_FO_classic_cart_cart_changeQuantity';
 
-describe('FO - cart : Change quantity', async () => {
+describe('FO - Cart : Change quantity', async () => {
   let browserContext: BrowserContext;
   let page: Page;
 
@@ -125,7 +125,7 @@ describe('FO - cart : Change quantity', async () => {
     await testContext.addContextItem(this, 'testIdentifier', 'checkErrorMessage', baseContext);
 
     const alertText = await foClassicCartPage.getNotificationMessage(page);
-    expect(alertText).to.contains(foClassicCartPage.errorNotificationForProductQuantity);
+    expect(alertText).to.contains(foClassicCartPage.errorNotificationForProductQuantity(300));
   });
 
   it('should check that proceed to checkout button is disabled', async function () {

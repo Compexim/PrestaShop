@@ -198,6 +198,7 @@ class CartCore extends ObjectModel
     public const ONLY_SHIPPING = 5;
     public const ONLY_WRAPPING = 6;
     public const ONLY_PHYSICAL_PRODUCTS_WITHOUT_SHIPPING = 8;
+    public const ONLY_PRODUCTS_WITHOUT_GIFTS = 9;
 
     private const DEFAULT_ATTRIBUTES_KEYS = ['attributes' => '', 'attributes_small' => ''];
 
@@ -262,6 +263,8 @@ class CartCore extends ObjectModel
         if (isset(self::$_totalWeight[$this->id])) {
             unset(self::$_totalWeight[$this->id]);
         }
+        $this->_products = null;
+        $this->_products_with_separated_gifts = null;
     }
 
     /**
@@ -313,10 +316,8 @@ class CartCore extends ObjectModel
      */
     public function update($nullValues = false)
     {
-        // Wipe all product-related caches, because something may just change
+        // Wipe all product-related caches, because something may just changed and we will need fresh data
         $this->resetProductRelatedStaticCache();
-        $this->_products = null;
-        $this->_products_with_separated_gifts = null;
 
         $return = parent::update($nullValues);
         Hook::exec('actionCartSave', ['cart' => $this]);
@@ -566,13 +567,11 @@ class CartCore extends ObjectModel
     }
 
     /**
-     * Get amount of Customer Discounts.
+     * Returns a total amount of cart rules of a specific ID in the current cart.
      *
      * @param int $id_cart_rule CartRule ID
      *
-     * @return int Amount of Customer Discounts
-     *
-     * @todo: What are customer discounts? Isn't this just a PriceRule and shouldn't this method be renamed instead?
+     * @return int Amount of cart rules used
      */
     public function getDiscountsCustomer($id_cart_rule)
     {
@@ -1509,7 +1508,7 @@ class CartCore extends ObjectModel
             throw new PrestaShopException(sprintf('Product with ID "%s" could not be loaded.', $id_product));
         }
 
-        // Wipe all product-related caches, because something may just change
+        // Wipe all product-related caches, because something may just changed and we will need fresh data
         $this->resetProductRelatedStaticCache();
 
         $data = [
@@ -1778,7 +1777,12 @@ class CartCore extends ObjectModel
         bool $preserveGiftsRemoval = true,
         bool $useOrderPrices = false
     ) {
-        // Wipe all product-related caches, because something may just change
+        /*
+         * Wipe all product-related caches, because something may just changed and we will need fresh data.
+         * For example, if we are calling $this->getProductsWithSeparatedGifts() to get the gifts in cart,
+         * we need to be sure we have the latest data. If not, we could be calculating with is_gift date for
+         * cart rules that are being deleted from the cart.
+         */
         $this->resetProductRelatedStaticCache();
 
         // First, if we are deleting a product with customization, we delete it from the database
@@ -1803,7 +1807,7 @@ class CartCore extends ObjectModel
 
         // Now, we must check if there are any products added as gifts in the cart and keep them.
         // We do this only for products without customization, because we can't have a customized
-        // product added as a gift
+        // product added as a gift.
         $preservedGifts = [];
         $giftKey = (int) $id_product . '-' . (int) $id_product_attribute;
         if ($preserveGiftsRemoval && empty($id_customization)) {
@@ -1849,6 +1853,8 @@ class CartCore extends ObjectModel
     }
 
     /**
+     * Gets information about quantity of gifts in cart for a given product.
+     *
      * @param int $id_product
      * @param int $id_product_attribute
      *
@@ -1856,24 +1862,16 @@ class CartCore extends ObjectModel
      */
     protected function getProductsGifts($id_product, $id_product_attribute)
     {
-        $id_product_attribute = (int) $id_product_attribute;
-
-        $gifts = array_filter($this->getProductsWithSeparatedGifts(), function ($product) {
-            return array_key_exists('is_gift', $product) && $product['is_gift'];
-        });
-
-        $preservedGifts = [$id_product . '-' . $id_product_attribute => 0];
-
-        foreach ($gifts as $gift) {
-            if (
-                (int) $gift['id_product_attribute'] === $id_product_attribute
-                && (int) $gift['id_product'] === $id_product
-            ) {
-                ++$preservedGifts[$id_product . '-' . $id_product_attribute];
+        $giftCount = 0;
+        foreach ($this->getProductsWithSeparatedGifts() as $product) {
+            if (!empty($product['is_gift'])
+                && (int) $product['id_product'] === (int) $id_product
+                && (int) $product['id_product_attribute'] === (int) $id_product_attribute) {
+                $giftCount += (int) $product['quantity'];
             }
         }
 
-        return $preservedGifts;
+        return [$id_product . '-' . $id_product_attribute => $giftCount];
     }
 
     /**
@@ -1942,6 +1940,7 @@ class CartCore extends ObjectModel
      *                  - BOTH_WITHOUT_SHIPPING
      *                  - ONLY_SHIPPING
      *                  - ONLY_WRAPPING
+     *                  - ONLY_PRODUCTS_WITHOUT_GIFTS
      *
      * @return string Formatted amount in Cart
      */
@@ -1986,6 +1985,7 @@ class CartCore extends ObjectModel
      *                  - Cart::ONLY_SHIPPING
      *                  - Cart::ONLY_WRAPPING
      *                  - Cart::ONLY_PHYSICAL_PRODUCTS_WITHOUT_SHIPPING
+     *                  - Cart::ONLY_PRODUCTS_WITHOUT_GIFTS
      * @param array $products
      * @param int $id_carrier
      * @param bool $use_cache @deprecated
@@ -2017,6 +2017,7 @@ class CartCore extends ObjectModel
             Cart::ONLY_SHIPPING,
             Cart::ONLY_WRAPPING,
             Cart::ONLY_PHYSICAL_PRODUCTS_WITHOUT_SHIPPING,
+            Cart::ONLY_PRODUCTS_WITHOUT_GIFTS,
         ];
         if (!in_array($type, $allowedTypes)) {
             throw new Exception('Invalid calculation type: ' . $type);
@@ -2024,24 +2025,42 @@ class CartCore extends ObjectModel
 
         // EARLY RETURNS
 
-        // if cart rules are not used
+        // If the type of calculation is ONLY_DISCOUNTS and cart rules are disabled,
+        // we can immediately return 0
         if ($type == Cart::ONLY_DISCOUNTS && !CartRule::isFeatureActive()) {
             return 0;
         }
-        // no shipping cost if is a cart with only virtuals products
+
+        // If the cart is FULLY virtual and the type of calculation is ONLY_SHIPPING,
+        // we can immediately return 0
         $virtual = $this->isVirtualCart();
         if ($virtual && $type == Cart::ONLY_SHIPPING) {
             return 0;
         }
+
+        // If the cart is FULLY virtual and the type of calculation is BOTH,
+        // we can switch it to BOTH_WITHOUT_SHIPPING, because there is no shipping
         if ($virtual && $type == Cart::BOTH) {
             $type = Cart::BOTH_WITHOUT_SHIPPING;
         }
 
-        // filter products
+        // If no specific products list is provided, we get the full list of products in cart
+        // In most cases, we calculate the total for all products in cart
         if (null === $products) {
-            $products = $this->getProducts(false, false, null, true, $keepOrderPrices);
+            if ($type == Cart::ONLY_PRODUCTS_WITHOUT_GIFTS) {
+                $products = $this->getProducts(false, false, null, true, $keepOrderPrices, true);
+                foreach ($products as $key => $product) {
+                    if (!empty($product['is_gift'])) {
+                        unset($products[$key]);
+                    }
+                }
+            } else {
+                $products = $this->getProducts(false, false, null, true, $keepOrderPrices, false);
+            }
         }
 
+        // If we want to calculate only physical products without shipping,
+        // we filter out virtual products from the products list
         if ($type == Cart::ONLY_PHYSICAL_PRODUCTS_WITHOUT_SHIPPING) {
             foreach ($products as $key => $product) {
                 if (!empty($product['is_virtual'])) {
@@ -2051,14 +2070,8 @@ class CartCore extends ObjectModel
             $type = Cart::ONLY_PRODUCTS;
         }
 
-        if ($type == Cart::ONLY_PRODUCTS) {
-            foreach ($products as $key => $product) {
-                if (!empty($product['is_gift'])) {
-                    unset($products[$key]);
-                }
-            }
-        }
-
+        // If taxes are disabled in configuration, we calculate everything without taxes,
+        // even if $withTaxes was passed as true
         if (!Configuration::get('PS_TAX')) {
             $withTaxes = false;
         }
@@ -2096,6 +2109,7 @@ class CartCore extends ObjectModel
                 $amount = $calculator->getTotal(true);
                 break;
             case Cart::ONLY_PRODUCTS:
+            case Cart::ONLY_PRODUCTS_WITHOUT_GIFTS:
                 $calculator->calculateRows();
                 $amount = $calculator->getRowTotal();
 
@@ -2109,12 +2123,10 @@ class CartCore extends ObjectModel
                 throw new Exception('unknown cart calculation type : ' . $type);
         }
 
-        // TAXES ?
-
+        // Apply taxes if required
         $value = $withTaxes ? $amount->getTaxIncluded() : $amount->getTaxExcluded();
 
-        // ROUND AND RETURN
-
+        // Round it, return it
         return Tools::ps_round($value, $computePrecision);
     }
 
@@ -2216,6 +2228,8 @@ class CartCore extends ObjectModel
     }
 
     /**
+     * @deprecated since 9.1.0, just use $this->id_address_delivery directly
+     *
      * @param array $products - not used anymore
      *
      * @return int
@@ -2256,6 +2270,8 @@ class CartCore extends ObjectModel
     }
 
     /**
+     * @deprecated since 9.1.0 - no longer used
+     *
      * @param bool $withTaxes
      * @param array $product
      * @param Context|null $virtualContext
@@ -2280,6 +2296,9 @@ class CartCore extends ObjectModel
     }
 
     /**
+     * Returns the address ID to be used for tax calculation according to the shop configuration.
+     * Basically the same as getTaxAddressId below, but with verification that the address exists.
+     *
      * @param array $product - not used anymore
      *
      * @return int|null
@@ -2302,7 +2321,8 @@ class CartCore extends ObjectModel
     }
 
     /**
-     * Returns the tax address id according to the shop's configuration
+     * Returns the address ID to be used for tax calculation according to the shop configuration.
+     * Basically the same as getProductAddressId above, but without verification that the address exists.
      *
      * @return int
      */
@@ -3090,8 +3110,9 @@ class CartCore extends ObjectModel
      * Set the delivery option and Carrier ID, if there is only one Carrier.
      *
      * @param array $delivery_option Delivery option array
+     * @param bool $useOrderPrices
      */
-    public function setDeliveryOption($delivery_option = null)
+    public function setDeliveryOption($delivery_option = null, bool $useOrderPrices = false)
     {
         if (empty($delivery_option)) {
             $this->delivery_option = '';
@@ -3121,8 +3142,8 @@ class CartCore extends ObjectModel
         $this->delivery_option = json_encode($delivery_option);
 
         // update auto cart rules
-        CartRule::autoRemoveFromCart();
-        CartRule::autoAddToCart();
+        CartRule::autoRemoveFromCart(null, $useOrderPrices);
+        CartRule::autoAddToCart(null, $useOrderPrices);
     }
 
     /**

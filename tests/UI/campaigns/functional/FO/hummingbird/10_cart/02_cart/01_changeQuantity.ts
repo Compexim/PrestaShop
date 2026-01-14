@@ -24,7 +24,7 @@ Scenario:
 Post-condition:
 - Uninstall hummingbird theme
 */
-describe('FO - cart : Change quantity', async () => {
+describe('FO - Cart : Change quantity', async () => {
   let browserContext: BrowserContext;
   let page: Page;
 
@@ -160,7 +160,7 @@ describe('FO - cart : Change quantity', async () => {
       await testContext.addContextItem(this, 'testIdentifier', 'checkErrorMessage', baseContext);
 
       const alertText = await foHummingbirdCartPage.getNotificationMessage(page);
-      expect(alertText).to.contains(foHummingbirdCartPage.errorNotificationForProductQuantity);
+      expect(alertText).to.contains(foHummingbirdCartPage.errorNotificationForProductQuantity(300));
     });
 
     it('should set the quantity 3 in the input without validation', async function () {
